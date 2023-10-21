@@ -1,0 +1,23 @@
+[package]
+name = "tiny_kafka"
+version = "1.0.0"
+authors = ["Christos Ploutarchou <cploutarchou@gmail.com>"]
+edition = "2021"
+description = "A tiny Kafka client library with producer and consumer functionalities."
+license = "MIT"
+
+[dependencies]
+rdkafka       = "0.34.0"
+tokio         = { version = "1.33.0", features = ["full"] }
+futures       = "0.3.28"
+log           = "0.4"
+env_logger    = "0.10.0"
+serde         = { version = "1.0", features = ["derive"] }
+serde_json    = "1.0"
+tokio-stream  = "0.1"
+simple_logger = "4.2.0"
+
+
+[lib]
+name = "tiny_kafka"
+path = "src/lib.rs"
