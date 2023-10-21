@@ -25,6 +25,7 @@ pub struct ReceivedMessage {
 ///
 /// ```no_run
 /// use std::collections::HashMap;
+/// use tiny_kafka::consumer::KafkaConsumer;
 /// let mut consumer = KafkaConsumer::new("localhost:9092", "my_group", "my_topic");
 ///
 /// // Consume messages in a loop
@@ -61,6 +62,7 @@ impl KafkaConsumer {
     /// Basic usage:
     ///
     /// ```no_run
+    /// use tiny_kafka::consumer::KafkaConsumer;
     /// let consumer = KafkaConsumer::new("localhost:9092", "my_group", "my_topic");
     /// ```
     pub fn new(brokers: &str, group_id: &str, topic_name: &str) -> Self {
@@ -94,6 +96,7 @@ impl KafkaConsumer {
     /// Basic usage:
     ///
     /// ```no_run
+    /// use tiny_kafka::consumer::KafkaConsumer;
     /// tokio::spawn(async move {
     ///     let consumer = KafkaConsumer::new("localhost:9092", "my_group", "my_topic");
     ///     if let Some(msg) = consumer.poll().await {
@@ -155,6 +158,7 @@ impl KafkaConsumer {
     ///
     /// ```no_run
     /// use std::collections::HashMap;
+    /// use tiny_kafka::consumer::KafkaConsumer;
     /// let mut consumer = KafkaConsumer::new("localhost:9092", "my_group", "my_topic");
     /// let mut new_configs = HashMap::new();
     /// new_configs.insert("auto.offset.reset".to_string(), "earliest".to_string());

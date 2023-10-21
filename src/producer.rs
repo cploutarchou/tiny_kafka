@@ -11,8 +11,8 @@ use std::time::Duration;
 /// Represents a message with a key and value to be sent to Kafka.
 #[derive(Serialize)]
 pub struct Message {
-    key: String,
-    value: String,
+    pub key: String,
+    pub value: String,
 }
 
 impl Message {
@@ -25,6 +25,7 @@ impl Message {
     /// # Examples
     ///
     /// ```
+    /// use tiny_kafka::producer::Message;
     /// let msg = Message::new("key1", "value1");
     /// assert_eq!(msg.key, "key1");
     /// assert_eq!(msg.value, "value1");
@@ -53,6 +54,8 @@ impl KafkaProducer {
     ///
     /// ```no_run
     /// // Initialize a KafkaProducer without any custom configurations
+    /// use std::collections::HashMap;
+    /// use tiny_kafka::producer::KafkaProducer;
     /// let producer = KafkaProducer::new("localhost:9092", None);
     ///
     /// // With custom configurations
@@ -90,6 +93,7 @@ impl KafkaProducer {
     /// # Examples
     ///
     /// ```no_run
+    /// use tiny_kafka::producer::{KafkaProducer, Message};
     /// let producer = KafkaProducer::new("localhost:9092", None);
     /// let msg = Message::new("key1", "value1");
     ///
@@ -137,6 +141,8 @@ impl KafkaProducer {
     /// # Examples
     ///
     /// ```no_run
+    /// use std::collections::HashMap;
+    /// use tiny_kafka::producer::KafkaProducer;
     /// let mut producer = KafkaProducer::new("localhost:9092", None);
     ///
     /// // Update producer configurations
