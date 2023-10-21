@@ -1,10 +1,12 @@
 [package]
 name = "tiny_kafka"
-version = "1.0.2"
+version = "1.0.3"
 authors = ["Christos Ploutarchou <cploutarchou@gmail.com>"]
 edition = "2021"
 description = "A tiny Kafka client library with producer and consumer functionalities."
 license = "MIT"
+repository = "https://github.com/cploutarchou/tiny_kafka"
+keywords = ["kafka", "rust-client", "producer", "consumer", "streaming"]
 
 [dependencies]
 rdkafka       = "0.34.0"
@@ -16,7 +18,6 @@ serde         = { version = "1.0", features = ["derive"] }
 serde_json    = "1.0"
 tokio-stream  = "0.1"
 simple_logger = "4.2.0"
-
 
 [lib]
 name = "tiny_kafka"
