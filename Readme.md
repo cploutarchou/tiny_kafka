@@ -11,7 +11,7 @@ This repository contains Rust-based implementations of a Kafka producer and a Ka
 
 1. **Clone the Repository**:
    ```bash
-   git clone <repository-url>
+   git clone github.com/cploutarchou/tiny_kafka
    ```
 
 2. **Navigate to the Repository**:
