@@ -1,7 +1,6 @@
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use bytes::BytesMut;
-use tokio::test; // Ensure to import the macro correctly
 
 struct KafkaProducer {
     broker_address: String,
@@ -17,6 +16,11 @@ impl KafkaProducer {
         };
         producer.connect().await?;
         Ok(producer)
+    }
+
+    /// Check if the producer is in a valid state.
+    fn is_ok(&self) -> bool {
+        self.stream.is_some()
     }
 
     /// Establish a connection to the Kafka broker.
@@ -50,7 +54,7 @@ impl KafkaProducer {
 
     /// Receive and handle the response from Kafka.
     async fn receive_response(&mut self) -> io::Result<()> {
-        let mut response = vec![0; 1024]; // Fixed size for demonstration
+        let mut response = vec![0; 1024];
         if let Some(ref mut stream) = self.stream {
             stream.read_exact(&mut response).await?;
             println!("Received response: {:?}", response);
@@ -67,7 +71,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_producer_success() {
         let addr = "127.0.0.1:9092".to_string();
-        let producer = KafkaProducer::new(addr).await;
+        let producer = KafkaProducer::new(addr).await.unwrap();
         assert!(producer.is_ok());
     }
 
