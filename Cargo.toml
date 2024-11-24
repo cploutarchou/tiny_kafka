@@ -1,12 +1,17 @@
 [package]
 name = "tiny_kafka"
-version = "1.0.5"
+version = "1.0.6"
 authors = ["Christos Ploutarchou <cploutarchou@gmail.com>"]
 edition = "2021"
 description = "A tiny Kafka client library with producer and consumer functionalities."
 license = "MIT"
 repository = "https://github.com/cploutarchou/tiny_kafka"
+documentation = "https://docs.rs/tiny_kafka"
+homepage = "https://github.com/cploutarchou/tiny_kafka"
+readme = "README.md"
 keywords = ["kafka", "rust-client", "producer", "consumer", "streaming"]
+categories = ["network-programming", "asynchronous", "database", "api-bindings"]
+rust-version = "1.70.0"
 
 [dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

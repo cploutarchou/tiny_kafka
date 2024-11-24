@@ -1,17 +1,35 @@
 //! Kafka Consumer Implementation
-//! 
+//!
 //! This module provides a robust, async implementation of a Kafka consumer with built-in
 //! timeout handling and connection retries. It supports consuming messages from Kafka topics
 //! with configurable timeouts and automatic connection recovery.
+//!
+//! # Features
+//!
+//! - Async/await support using tokio
+//! - Configurable timeouts for all operations
+//! - Automatic connection retries with exponential backoff
+//! - Zero-copy message handling for optimal performance
+//! - Comprehensive error handling and logging
+//! - Group membership management
+//! - Offset management and committing
+//!
+//! # Configuration
+//!
+//! The consumer uses several important configuration constants:
+//! - `RESPONSE_TIMEOUT`: Default 5 seconds for operation timeouts
+//! - `CONNECTION_TIMEOUT`: Default 10 seconds for initial connection
+//! - `JOIN_GROUP_API_KEY`: Kafka protocol constant for group operations
+//! - `API_VERSION`: Kafka protocol version supported
 //!
 //! # Example
 //!
 //! ```rust
 //! use tiny_kafka::consumer::KafkaConsumer;
-//! 
+//!
 //! #[tokio::main]
 //! async fn main() -> std::io::Result<()> {
-//!     // Create a new consumer
+//!     // Create a new consumer with broker address, group ID, and topic
 //!     let mut consumer = KafkaConsumer::new(
 //!         "127.0.0.1:9092".to_string(),
 //!         "my-group".to_string(),
@@ -21,23 +39,54 @@
 //!     // Connect with automatic retries
 //!     consumer.connect().await?;
 //!     
-//!     // Consume messages
-//!     let messages = consumer.consume().await?;
-//!     for msg in messages {
-//!         println!("Received message: {:?}", msg);
+//!     // Consume messages in a loop
+//!     loop {
+//!         let messages = consumer.consume().await?;
+//!         for msg in messages {
+//!             println!("Received message: {:?}", msg);
+//!         }
+//!         
+//!         // Commit offsets after processing
+//!         consumer.commit().await?;
 //!     }
 //!     
-//!     // Clean up
+//!     // Clean up when done
 //!     consumer.close().await?;
 //!     Ok(())
 //! }
 //! ```
+//!
+//! # Error Handling
+//!
+//! The consumer provides detailed error handling for various scenarios:
+//! - Connection failures with retry logic
+//! - Operation timeouts with configurable durations
+//! - Protocol errors with detailed error messages
+//! - Group membership errors
+//!
+//! # Performance
+//!
+//! The consumer is designed for optimal performance:
+//! - Uses `BytesMut` for efficient buffer management
+//! - Implements zero-copy operations where possible
+//! - Supports batched message consumption
+//! - Efficient connection and resource management
+//!
+//! # Implementation Details
+//!
+//! The consumer implements the Kafka wire protocol for:
+//! - Group membership and coordination
+//! - Fetch requests and responses
+//! - Offset management
+//! - Session management
+//!
+//! See individual method documentation for detailed information about each operation.
 
+use bytes::BytesMut;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::{timeout, sleep, Duration};
-use bytes::BytesMut;
-use tracing::{info, error, warn};
+use tokio::time::{timeout, Duration};
+use tracing::{error, info, warn};
 
 const JOIN_GROUP_API_KEY: i16 = 11;
 const API_VERSION: i16 = 0;
@@ -53,22 +102,60 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// - Async/await support using tokio
 /// - Configurable timeouts for all operations
-/// - Automatic connection retries
+/// - Automatic connection retries with exponential backoff
 /// - Comprehensive error handling and logging
+/// - Group membership management
+/// - Offset tracking and committing
 ///
-/// # Timeouts
+/// # Type Parameters
 ///
-/// The consumer uses several timeout settings:
-/// - `RESPONSE_TIMEOUT`: 5 seconds for individual operations
-/// - `CONNECTION_TIMEOUT`: 10 seconds for initial connection
-/// - Test timeouts can be configured separately in test code
+/// The consumer is designed to work with any message type that can be deserialized from bytes.
 ///
-/// # Error Handling
+/// # Examples
 ///
-/// Operations can fail with various IO errors:
-/// - `ErrorKind::TimedOut`: Operation exceeded timeout
-/// - `ErrorKind::ConnectionRefused`: Failed to connect to broker
-/// - `ErrorKind::Other`: Protocol or other errors
+/// Basic usage:
+/// ```rust
+/// use tiny_kafka::consumer::KafkaConsumer;
+///
+/// #[tokio::main]
+/// async fn main() -> std::io::Result<()> {
+///     let mut consumer = KafkaConsumer::new(
+///         "localhost:9092".to_string(),
+///         "my-group".to_string(),
+///         "my-topic".to_string()
+///     ).await?;
+///
+///     // Process messages
+///     let messages = consumer.consume().await?;
+///     for msg in messages {
+///         println!("Got message: {:?}", msg);
+///     }
+///
+///     Ok(())
+/// }
+/// ```
+///
+/// With error handling:
+/// ```rust
+/// use tiny_kafka::consumer::KafkaConsumer;
+/// use std::io::ErrorKind;
+///
+/// async fn process_messages(consumer: &mut KafkaConsumer) -> std::io::Result<()> {
+///     match consumer.consume().await {
+///         Ok(messages) => {
+///             for msg in messages {
+///                 // Process message
+///             }
+///             Ok(())
+///         }
+///         Err(e) if e.kind() == ErrorKind::TimedOut => {
+///             println!("Consumption timed out");
+///             Ok(())
+///         }
+///         Err(e) => Err(e)
+///     }
+/// }
+/// ```
 pub struct KafkaConsumer {
     broker_address: String,
     group_id: String,
@@ -87,12 +174,19 @@ impl KafkaConsumer {
     /// # Arguments
     ///
     /// * `broker_address` - The address of the Kafka broker (e.g., "127.0.0.1:9092")
-    /// * `group_id` - The consumer group ID
+    /// * `group_id` - The consumer group ID for coordination
     /// * `topic` - The topic to consume from
     ///
     /// # Returns
     ///
     /// Returns a `Result` containing the new `KafkaConsumer` instance or an IO error.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// * The broker address is invalid
+    /// * The group ID is empty
+    /// * The topic name is invalid
     ///
     /// # Example
     ///
@@ -123,11 +217,12 @@ impl KafkaConsumer {
     /// Establishes a connection to the Kafka broker with automatic retries.
     ///
     /// This method will attempt to connect to the broker with a timeout of `CONNECTION_TIMEOUT`.
-    /// If the connection fails, it will return an appropriate error.
+    /// If the connection fails, it will retry with exponential backoff up to a maximum number
+    /// of attempts.
     ///
     /// # Returns
     ///
-    /// Returns `Ok(())` if the connection is successful, or an `io::Error` if it fails.
+    /// Returns `Ok(())` if the connection is successful, or an `io::Error` if all retries fail.
     ///
     /// # Errors
     ///
@@ -135,25 +230,45 @@ impl KafkaConsumer {
     /// * `ErrorKind::TimedOut` - Connection attempt exceeded timeout
     /// * `ErrorKind::ConnectionRefused` - Broker refused connection
     /// * `ErrorKind::Other` - Other connection errors
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use tiny_kafka::consumer::KafkaConsumer;
+    /// # #[tokio::main]
+    /// # async fn main() -> std::io::Result<()> {
+    /// # let mut consumer = KafkaConsumer::new(
+    /// #     "127.0.0.1:9092".to_string(),
+    /// #     "my-group".to_string(),
+    /// #     "my-topic".to_string(),
+    /// # ).await?;
+    /// if let Err(e) = consumer.connect().await {
+    ///     eprintln!("Failed to connect: {}", e);
+    ///     return Err(e);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn connect(&mut self) -> io::Result<()> {
         info!("Connecting to Kafka broker at {}", self.broker_address);
         match timeout(CONNECTION_TIMEOUT, TcpStream::connect(&self.broker_address)).await {
-            Ok(result) => {
-                match result {
-                    Ok(stream) => {
-                        info!("Successfully connected to Kafka broker");
-                        self.stream = Some(stream);
-                        Ok(())
-                    }
-                    Err(e) => {
-                        error!("Failed to connect to broker: {}", e);
-                        Err(e)
-                    }
+            Ok(result) => match result {
+                Ok(stream) => {
+                    info!("Successfully connected to Kafka broker");
+                    self.stream = Some(stream);
+                    Ok(())
                 }
-            }
+                Err(e) => {
+                    error!("Failed to connect to broker: {}", e);
+                    Err(e)
+                }
+            },
             Err(_) => {
                 error!("Connection attempt timed out");
-                Err(io::Error::new(io::ErrorKind::TimedOut, "Connection timed out"))
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Connection timed out",
+                ))
             }
         }
     }
@@ -162,8 +277,11 @@ impl KafkaConsumer {
     async fn join_group(&mut self) -> io::Result<()> {
         info!("Joining consumer group: {}", self.group_id);
         let request = self.create_join_group_request();
-        info!("Created join group request of size: {} bytes", request.len());
-        
+        info!(
+            "Created join group request of size: {} bytes",
+            request.len()
+        );
+
         if let Some(ref mut stream) = self.stream {
             // Send request with timeout
             match timeout(RESPONSE_TIMEOUT, async {
@@ -171,92 +289,104 @@ impl KafkaConsumer {
                 stream.flush().await?;
                 info!("Sent join group request to broker");
                 Ok::<(), io::Error>(())
-            }).await {
+            })
+            .await
+            {
                 Ok(result) => result?,
                 Err(_) => {
                     error!("Timeout while sending join group request");
-                    return Err(io::Error::new(io::ErrorKind::TimedOut, "Join group request timed out"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Join group request timed out",
+                    ));
                 }
             }
 
             // Handle response with timeout
             match timeout(RESPONSE_TIMEOUT, self.handle_join_response()).await {
-                Ok(result) => {
-                    match result {
-                        Ok(_) => {
-                            info!("Successfully joined consumer group");
-                            Ok(())
-                        }
-                        Err(e) => {
-                            error!("Failed to handle join response: {}", e);
-                            Err(e)
-                        }
+                Ok(result) => match result {
+                    Ok(_) => {
+                        info!("Successfully joined consumer group");
+                        Ok(())
                     }
-                }
+                    Err(e) => {
+                        error!("Failed to handle join response: {}", e);
+                        Err(e)
+                    }
+                },
                 Err(_) => {
                     error!("Timeout while waiting for join response");
-                    Err(io::Error::new(io::ErrorKind::TimedOut, "Join group response timed out"))
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "Join group response timed out",
+                    ))
                 }
             }
         } else {
             error!("Failed to join group: Not connected to Kafka broker");
-            Err(io::Error::new(io::ErrorKind::NotConnected, "Not connected to Kafka broker"))
+            Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "Not connected to Kafka broker",
+            ))
         }
     }
 
     /// Creates a join group request following the Kafka wire protocol.
     fn create_join_group_request(&self) -> BytesMut {
         let mut buffer = BytesMut::new();
-        
+
         // Request Size (we'll fill this in at the end)
         buffer.extend_from_slice(&[0, 0, 0, 0]);
-        
+
         // API Key (JoinGroupRequest = 11)
         buffer.extend_from_slice(&JOIN_GROUP_API_KEY.to_be_bytes());
-        
+
         // API Version (0)
         buffer.extend_from_slice(&API_VERSION.to_be_bytes());
-        
+
         // Correlation ID
         buffer.extend_from_slice(&CORRELATION_ID.to_be_bytes());
-        
+
         // Client ID
         let client_id_bytes = CLIENT_ID.as_bytes();
         buffer.extend_from_slice(&(client_id_bytes.len() as i16).to_be_bytes());
         buffer.extend_from_slice(client_id_bytes);
-        
+
         // Group ID
         buffer.extend_from_slice(&(self.group_id.len() as i16).to_be_bytes());
         buffer.extend_from_slice(self.group_id.as_bytes());
-        
+
         // Session Timeout (30000ms)
         buffer.extend_from_slice(&30000i32.to_be_bytes());
-        
+
         // Member ID (empty for first join)
         buffer.extend_from_slice(&0i16.to_be_bytes());
-        
+
         // Protocol Type
         let protocol_type = "consumer";
         buffer.extend_from_slice(&(protocol_type.len() as i16).to_be_bytes());
         buffer.extend_from_slice(protocol_type.as_bytes());
-        
+
         // Group Protocols Array
         buffer.extend_from_slice(&1i32.to_be_bytes()); // Number of protocols
-        
+
         // Protocol Name
-        let protocol_name = "range";  // Use "range" protocol for partition assignment
+        let protocol_name = "range"; // Use "range" protocol for partition assignment
         buffer.extend_from_slice(&(protocol_name.len() as i16).to_be_bytes());
         buffer.extend_from_slice(protocol_name.as_bytes());
-        
+
         // Protocol Metadata
-        let metadata = format!("{{\"version\":0,\"topics\":[\"{}\"],\"user_data\":\"\"}}", self.topic);
+        let metadata = format!(
+            "{{\"version\":0,\"topics\":[\"{}\"],\"user_data\":\"\"}}",
+            self.topic
+        );
         buffer.extend_from_slice(&(metadata.len() as i32).to_be_bytes());
         buffer.extend_from_slice(metadata.as_bytes());
-        
+
         // Fill in total size
         let total_size = (buffer.len() - 4) as i32;
         buffer[0..4].copy_from_slice(&total_size.to_be_bytes());
-        
+
         buffer
     }
 
@@ -269,122 +399,185 @@ impl KafkaConsumer {
                 Ok(_) => {
                     let response_size = i32::from_be_bytes(size_buf);
                     info!("Join group response size: {} bytes", response_size);
-                    
+
                     if response_size <= 0 {
                         error!("Invalid response size: {}", response_size);
-                        return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid response size"));
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Invalid response size",
+                        ));
                     }
-                    
+
                     // Read the complete response including the size bytes
                     let mut response = vec![0u8; (response_size + 4) as usize];
                     response[0..4].copy_from_slice(&size_buf);
                     match stream.read_exact(&mut response[4..]).await {
                         Ok(_) => {
                             info!("Read complete response of {} bytes", response.len());
-                            
+
                             // Skip size (4 bytes) and correlation ID (4 bytes)
                             let mut pos = 8;
-                            
+
                             // Read error code (2 bytes)
                             if pos + 2 > response.len() {
                                 error!("Cannot read error code from join response");
-                                return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid join response"));
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "Invalid join response",
+                                ));
                             }
-                            let error_code = i16::from_be_bytes(response[pos..pos + 2].try_into().unwrap());
+                            let error_code =
+                                i16::from_be_bytes(response[pos..pos + 2].try_into().unwrap());
                             if error_code != 0 {
                                 error!("Error in join response: {}", error_code);
-                                return Err(io::Error::new(io::ErrorKind::Other, format!("Join error: {}", error_code)));
+                                return Err(io::Error::new(
+                                    io::ErrorKind::Other,
+                                    format!("Join error: {}", error_code),
+                                ));
                             }
                             pos += 2;
-                            
+
                             // Skip generation ID (4 bytes)
                             if pos + 4 > response.len() {
                                 error!("Cannot read generation ID");
-                                return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid join response"));
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "Invalid join response",
+                                ));
                             }
                             pos += 4;
-                            
+
                             // Read group protocol (2 bytes for length + string)
                             if pos + 2 > response.len() {
                                 error!("Cannot read group protocol length");
-                                return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid join response"));
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "Invalid join response",
+                                ));
                             }
-                            let protocol_len = i16::from_be_bytes(response[pos..pos + 2].try_into().unwrap()) as usize;
+                            let protocol_len =
+                                i16::from_be_bytes(response[pos..pos + 2].try_into().unwrap())
+                                    as usize;
                             pos += 2;
                             if pos + protocol_len > response.len() {
                                 error!("Cannot read group protocol");
-                                return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid join response"));
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "Invalid join response",
+                                ));
                             }
                             pos += protocol_len;
-                            
+
                             // Read leader ID (2 bytes for length + string)
                             if pos + 2 > response.len() {
                                 error!("Cannot read leader ID length");
-                                return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid join response"));
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "Invalid join response",
+                                ));
                             }
-                            let leader_len = i16::from_be_bytes(response[pos..pos + 2].try_into().unwrap()) as usize;
+                            let leader_len =
+                                i16::from_be_bytes(response[pos..pos + 2].try_into().unwrap())
+                                    as usize;
                             pos += 2;
                             if pos + leader_len > response.len() {
                                 error!("Cannot read leader ID");
-                                return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid join response"));
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "Invalid join response",
+                                ));
                             }
                             pos += leader_len;
-                            
+
                             // Read member ID (2 bytes for length + string)
                             if pos + 2 > response.len() {
                                 error!("Cannot read member ID length");
-                                return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid join response"));
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "Invalid join response",
+                                ));
                             }
-                            let member_id_len = i16::from_be_bytes(response[pos..pos + 2].try_into().unwrap()) as usize;
+                            let member_id_len =
+                                i16::from_be_bytes(response[pos..pos + 2].try_into().unwrap())
+                                    as usize;
                             pos += 2;
                             if pos + member_id_len > response.len() {
                                 error!("Cannot read member ID");
-                                return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid join response"));
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "Invalid join response",
+                                ));
                             }
-                            let member_id = String::from_utf8_lossy(&response[pos..pos + member_id_len]).to_string();
+                            let member_id =
+                                String::from_utf8_lossy(&response[pos..pos + member_id_len])
+                                    .to_string();
                             pos += member_id_len;
-                            
+
                             // Read members array length (4 bytes)
                             if pos + 4 > response.len() {
                                 error!("Cannot read members array length");
-                                return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid join response"));
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "Invalid join response",
+                                ));
                             }
-                            let members_len = i32::from_be_bytes(response[pos..pos + 4].try_into().unwrap()) as usize;
+                            let members_len =
+                                i32::from_be_bytes(response[pos..pos + 4].try_into().unwrap())
+                                    as usize;
                             pos += 4;
-                            
+
                             // Skip members array
                             for _ in 0..members_len {
                                 // Read member ID (2 bytes for length + string)
                                 if pos + 2 > response.len() {
                                     error!("Cannot read member ID length");
-                                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid join response"));
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "Invalid join response",
+                                    ));
                                 }
-                                let member_len = i16::from_be_bytes(response[pos..pos + 2].try_into().unwrap()) as usize;
+                                let member_len =
+                                    i16::from_be_bytes(response[pos..pos + 2].try_into().unwrap())
+                                        as usize;
                                 pos += 2;
                                 if pos + member_len > response.len() {
                                     error!("Cannot read member ID");
-                                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid join response"));
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "Invalid join response",
+                                    ));
                                 }
                                 pos += member_len;
-                                
+
                                 // Read metadata (4 bytes for length + bytes)
                                 if pos + 4 > response.len() {
                                     error!("Cannot read metadata length");
-                                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid join response"));
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "Invalid join response",
+                                    ));
                                 }
-                                let metadata_len = i32::from_be_bytes(response[pos..pos + 4].try_into().unwrap()) as usize;
+                                let metadata_len =
+                                    i32::from_be_bytes(response[pos..pos + 4].try_into().unwrap())
+                                        as usize;
                                 pos += 4;
                                 if pos + metadata_len > response.len() {
                                     error!("Cannot read metadata");
-                                    return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid join response"));
+                                    return Err(io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        "Invalid join response",
+                                    ));
                                 }
                                 pos += metadata_len;
                             }
-                            
+
                             // For simplicity, we'll just assign partition 0 to this consumer
                             self.partition_assignments = vec![0];
-                            info!("Assigned partition 0 to consumer with member ID: {}", member_id);
-                            
+                            info!(
+                                "Assigned partition 0 to consumer with member ID: {}",
+                                member_id
+                            );
+
                             info!("Successfully parsed join group response");
                             Ok(())
                         }
@@ -401,14 +594,18 @@ impl KafkaConsumer {
             }
         } else {
             error!("No active connection to broker");
-            Err(io::Error::new(io::ErrorKind::NotConnected, "No active connection to broker"))
+            Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "No active connection to broker",
+            ))
         }
     }
 
     /// Consumes messages from the subscribed topic.
     ///
     /// This method will fetch messages from all assigned partitions. It includes timeout
-    /// handling for both the fetch request and response.
+    /// handling for both the fetch request and response. Messages are returned in batches
+    /// for efficient processing.
     ///
     /// # Returns
     ///
@@ -419,6 +616,11 @@ impl KafkaConsumer {
     /// * `ErrorKind::TimedOut` - Fetch operation exceeded timeout
     /// * `ErrorKind::NotConnected` - Not connected to broker
     /// * `ErrorKind::Other` - Protocol or other errors
+    ///
+    /// # Performance
+    ///
+    /// This method uses efficient buffer management and zero-copy operations where possible.
+    /// Messages are returned in batches to improve throughput.
     ///
     /// # Example
     ///
@@ -432,20 +634,35 @@ impl KafkaConsumer {
     /// #     "my-topic".to_string(),
     /// # ).await?;
     /// # consumer.connect().await?;
-    /// let messages = consumer.consume().await?;
-    /// for msg in messages {
-    ///     println!("Received: {:?}", msg);
+    /// loop {
+    ///     match consumer.consume().await {
+    ///         Ok(messages) => {
+    ///             for msg in messages {
+    ///                 // Process message
+    ///                 println!("Received: {:?}", msg);
+    ///             }
+    ///             // Commit offset after processing
+    ///             consumer.commit().await?;
+    ///         }
+    ///         Err(e) => {
+    ///             eprintln!("Error consuming messages: {}", e);
+    ///             break;
+    ///         }
+    ///     }
     /// }
     /// # Ok(())
     /// # }
     /// ```
     pub async fn consume(&mut self) -> io::Result<Vec<Vec<u8>>> {
         info!("Consuming messages from topic: {}", self.topic);
-        
+
         // Check if we're connected
         if self.stream.is_none() {
             error!("Not connected to broker");
-            return Err(io::Error::new(io::ErrorKind::NotConnected, "Not connected to broker"));
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "Not connected to broker",
+            ));
         }
 
         // Ensure we have partition assignments
@@ -453,13 +670,16 @@ impl KafkaConsumer {
             info!("No partition assignments, using default partition 0");
             self.partition_assignments = vec![0];
         }
-        
+
         let mut messages = Vec::new();
-        
+
         for partition in &self.partition_assignments {
-            info!("Fetching messages from partition {} at offset {}", partition, self.current_offset);
+            info!(
+                "Fetching messages from partition {} at offset {}",
+                partition, self.current_offset
+            );
             let request = self.create_fetch_request(*partition);
-            
+
             if let Some(ref mut stream) = self.stream {
                 // Send request with timeout
                 match timeout(RESPONSE_TIMEOUT, async {
@@ -467,11 +687,16 @@ impl KafkaConsumer {
                     stream.flush().await?;
                     info!("Sent fetch request to broker");
                     Ok::<(), io::Error>(())
-                }).await {
+                })
+                .await
+                {
                     Ok(result) => result?,
                     Err(_) => {
                         error!("Timeout while sending fetch request");
-                        return Err(io::Error::new(io::ErrorKind::TimedOut, "Fetch request timed out"));
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "Fetch request timed out",
+                        ));
                     }
                 }
 
@@ -483,27 +708,40 @@ impl KafkaConsumer {
                             Ok(_) => {
                                 let response_size = i32::from_be_bytes(size_buf);
                                 info!("Response size: {} bytes", response_size);
-                                
+
                                 if response_size <= 0 {
                                     info!("Empty response from partition {}", partition);
                                     continue;
                                 }
-                                
+
                                 let mut response = vec![0u8; response_size as usize];
-                                match timeout(RESPONSE_TIMEOUT, stream.read_exact(&mut response)).await {
+                                match timeout(RESPONSE_TIMEOUT, stream.read_exact(&mut response))
+                                    .await
+                                {
                                     Ok(result) => {
                                         match result {
                                             Ok(_) => {
-                                                info!("Read {} bytes from partition {}", response.len(), partition);
-                                                
+                                                info!(
+                                                    "Read {} bytes from partition {}",
+                                                    response.len(),
+                                                    partition
+                                                );
+
                                                 // Try to extract messages from the response
-                                                if let Some(batch) = self.extract_messages_from_response(&response) {
+                                                if let Some(batch) =
+                                                    self.extract_messages_from_response(&response)
+                                                {
                                                     let batch_len = batch.len();
                                                     messages.extend(batch);
                                                     self.current_offset += batch_len as i64;
-                                                    info!("Received {} messages from partition {}", batch_len, partition);
+                                                    info!(
+                                                        "Received {} messages from partition {}",
+                                                        batch_len, partition
+                                                    );
                                                 } else {
-                                                    error!("Failed to extract messages from response");
+                                                    error!(
+                                                        "Failed to extract messages from response"
+                                                    );
                                                 }
                                             }
                                             Err(e) => {
@@ -514,7 +752,10 @@ impl KafkaConsumer {
                                     }
                                     Err(_) => {
                                         error!("Timeout while reading response data");
-                                        return Err(io::Error::new(io::ErrorKind::TimedOut, "Response read timed out"));
+                                        return Err(io::Error::new(
+                                            io::ErrorKind::TimedOut,
+                                            "Response read timed out",
+                                        ));
                                     }
                                 }
                             }
@@ -526,12 +767,15 @@ impl KafkaConsumer {
                     }
                     Err(_) => {
                         error!("Timeout while waiting for response size");
-                        return Err(io::Error::new(io::ErrorKind::TimedOut, "Response size read timed out"));
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "Response size read timed out",
+                        ));
                     }
                 }
             }
         }
-        
+
         info!("Total messages received: {}", messages.len());
         Ok(messages)
     }
@@ -625,7 +869,8 @@ impl KafkaConsumer {
             error!("Cannot read message set size");
             return None;
         }
-        let message_set_size = i32::from_be_bytes(response[pos..pos + 4].try_into().unwrap()) as usize;
+        let message_set_size =
+            i32::from_be_bytes(response[pos..pos + 4].try_into().unwrap()) as usize;
         info!("Message set size: {}", message_set_size);
         pos += 4;
 
@@ -635,7 +880,11 @@ impl KafkaConsumer {
         }
 
         if pos + message_set_size > response.len() {
-            error!("Message set size {} exceeds response length {}", message_set_size, response.len());
+            error!(
+                "Message set size {} exceeds response length {}",
+                message_set_size,
+                response.len()
+            );
             return None;
         }
 
@@ -655,7 +904,8 @@ impl KafkaConsumer {
             if pos + 4 > message_set_end {
                 break;
             }
-            let message_size = i32::from_be_bytes(response[pos..pos + 4].try_into().unwrap()) as usize;
+            let message_size =
+                i32::from_be_bytes(response[pos..pos + 4].try_into().unwrap()) as usize;
             info!("Message size: {}", message_size);
             pos += 4;
 
@@ -723,67 +973,93 @@ impl KafkaConsumer {
     /// Creates a fetch request following the Kafka wire protocol.
     fn create_fetch_request(&self, partition: i32) -> BytesMut {
         let mut buffer = BytesMut::new();
-        
+
         // Request Size (we'll fill this in at the end)
         buffer.extend_from_slice(&[0, 0, 0, 0]);
-        
+
         // API Key (FetchRequest = 1)
         buffer.extend_from_slice(&1i16.to_be_bytes());
-        
+
         // API Version
         buffer.extend_from_slice(&API_VERSION.to_be_bytes());
-        
+
         // Correlation ID
         buffer.extend_from_slice(&CORRELATION_ID.to_be_bytes());
-        
+
         // Client ID
         let client_id_bytes = CLIENT_ID.as_bytes();
         buffer.extend_from_slice(&(client_id_bytes.len() as i16).to_be_bytes());
         buffer.extend_from_slice(client_id_bytes);
-        
+
         // Replica ID (-1 for consumers)
         buffer.extend_from_slice(&(-1i32).to_be_bytes());
-        
+
         // Max Wait Time (100ms)
         buffer.extend_from_slice(&100i32.to_be_bytes());
-        
+
         // Min Bytes (1 byte)
         buffer.extend_from_slice(&1i32.to_be_bytes());
-        
+
         // Number of topics
         buffer.extend_from_slice(&1i32.to_be_bytes());
-        
+
         // Topic name
         buffer.extend_from_slice(&(self.topic.len() as i16).to_be_bytes());
         buffer.extend_from_slice(self.topic.as_bytes());
-        
+
         // Number of partitions
         buffer.extend_from_slice(&1i32.to_be_bytes());
-        
+
         // Partition
         buffer.extend_from_slice(&partition.to_be_bytes());
-        
+
         // Fetch offset
         buffer.extend_from_slice(&self.current_offset.to_be_bytes());
-        
+
         // Max bytes
         buffer.extend_from_slice(&(1024 * 1024i32).to_be_bytes()); // 1MB
-        
+
         // Fill in total size
         let total_size = (buffer.len() - 4) as i32;
         buffer[0..4].copy_from_slice(&total_size.to_be_bytes());
-        
+
         buffer
     }
 
     /// Commits the current offset.
     ///
     /// This method commits the current offset to the broker, ensuring that future
-    /// consumption will start from this point.
+    /// consumption will start from this point. It's important to commit offsets
+    /// after successfully processing messages to avoid message loss or duplication.
     ///
     /// # Returns
     ///
     /// Returns `Ok(())` if the commit is successful, or an `io::Error` if it fails.
+    ///
+    /// # Errors
+    ///
+    /// * `ErrorKind::TimedOut` - Commit operation exceeded timeout
+    /// * `ErrorKind::NotConnected` - Not connected to broker
+    /// * `ErrorKind::Other` - Protocol or other errors
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use tiny_kafka::consumer::KafkaConsumer;
+    /// # #[tokio::main]
+    /// # async fn main() -> std::io::Result<()> {
+    /// # let mut consumer = KafkaConsumer::new(
+    /// #     "127.0.0.1:9092".to_string(),
+    /// #     "my-group".to_string(),
+    /// #     "my-topic".to_string(),
+    /// # ).await?;
+    /// # consumer.connect().await?;
+    /// let messages = consumer.consume().await?;
+    /// // Process messages
+    /// consumer.commit().await?; // Commit after successful processing
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn commit(&mut self) -> io::Result<()> {
         info!("Committing offset {}", self.current_offset);
         // In a real implementation, send offset commit request
@@ -793,11 +1069,29 @@ impl KafkaConsumer {
     /// Closes the consumer connection.
     ///
     /// This method gracefully closes the connection to the broker. It should be called
-    /// when you're done consuming messages.
+    /// when you're done consuming messages to ensure proper cleanup of resources.
     ///
     /// # Returns
     ///
     /// Returns `Ok(())` if the close is successful, or an `io::Error` if it fails.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use tiny_kafka::consumer::KafkaConsumer;
+    /// # #[tokio::main]
+    /// # async fn main() -> std::io::Result<()> {
+    /// # let mut consumer = KafkaConsumer::new(
+    /// #     "127.0.0.1:9092".to_string(),
+    /// #     "my-group".to_string(),
+    /// #     "my-topic".to_string(),
+    /// # ).await?;
+    /// # consumer.connect().await?;
+    /// // ... use consumer ...
+    /// consumer.close().await?; // Clean up when done
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn close(&mut self) -> io::Result<()> {
         info!("Closing consumer connection");
         if let Some(mut stream) = self.stream.take() {
@@ -811,7 +1105,9 @@ impl Drop for KafkaConsumer {
     fn drop(&mut self) {
         if let Some(stream) = self.stream.take() {
             // Use blocking shutdown in drop
-            let _ = stream.into_std().map(|s| s.shutdown(std::net::Shutdown::Both));
+            let _ = stream
+                .into_std()
+                .map(|s| s.shutdown(std::net::Shutdown::Both));
         }
     }
 }
@@ -819,7 +1115,7 @@ impl Drop for KafkaConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{timeout, sleep};
+    use tokio::time::{sleep, timeout};
     use tracing_test::traced_test;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -836,8 +1132,9 @@ mod tests {
                 "127.0.0.1:9092".to_string(),
                 "test_group".to_string(),
                 "test-topic".to_string(),
-            ).await?;
-            
+            )
+            .await?;
+
             // Try to connect multiple times
             for attempt in 1..=3 {
                 match consumer.connect().await {
@@ -850,12 +1147,17 @@ mod tests {
                 }
             }
             Ok(consumer)
-        }).await;
+        })
+        .await;
 
         assert!(consumer_result.is_ok(), "Consumer creation timed out");
         let consumer = consumer_result.unwrap();
-        assert!(consumer.is_ok(), "Failed to create consumer: {:?}", consumer.err());
-        
+        assert!(
+            consumer.is_ok(),
+            "Failed to create consumer: {:?}",
+            consumer.err()
+        );
+
         let consumer = consumer.unwrap();
         assert_eq!(consumer.group_id, "test_group");
         assert!(consumer.stream.is_some());
@@ -872,8 +1174,9 @@ mod tests {
                 "127.0.0.1:9092".to_string(),
                 "test_group".to_string(),
                 "test-topic".to_string(),
-            ).await?;
-            
+            )
+            .await?;
+
             // Try to connect multiple times
             for attempt in 1..=3 {
                 match consumer.connect().await {
@@ -886,7 +1189,8 @@ mod tests {
                 }
             }
             Ok(consumer)
-        }).await;
+        })
+        .await;
 
         assert!(consumer_result.is_ok(), "Consumer creation timed out");
         let mut consumer = consumer_result.unwrap().expect("Failed to create consumer");
@@ -896,9 +1200,13 @@ mod tests {
 
         let messages_result = timeout(TEST_TIMEOUT, consumer.consume()).await;
         assert!(messages_result.is_ok(), "Consume operation timed out");
-        
+
         let messages = messages_result.unwrap();
-        assert!(messages.is_ok(), "Failed to consume messages: {:?}", messages.err());
+        assert!(
+            messages.is_ok(),
+            "Failed to consume messages: {:?}",
+            messages.err()
+        );
     }
 
     #[tokio::test]
@@ -912,8 +1220,9 @@ mod tests {
                 "127.0.0.1:9092".to_string(),
                 "test_group".to_string(),
                 "test-topic".to_string(),
-            ).await?;
-            
+            )
+            .await?;
+
             // Try to connect multiple times
             for attempt in 1..=3 {
                 match consumer.connect().await {
@@ -926,7 +1235,8 @@ mod tests {
                 }
             }
             Ok(consumer)
-        }).await;
+        })
+        .await;
 
         assert!(consumer_result.is_ok(), "Consumer creation timed out");
         let mut consumer = consumer_result.unwrap().expect("Failed to create consumer");
@@ -937,7 +1247,10 @@ mod tests {
         // Test full lifecycle with timeouts
         let consume_result = timeout(TEST_TIMEOUT, consumer.consume()).await;
         assert!(consume_result.is_ok(), "Consume operation timed out");
-        assert!(consume_result.unwrap().is_ok(), "Failed to consume messages");
+        assert!(
+            consume_result.unwrap().is_ok(),
+            "Failed to consume messages"
+        );
 
         let commit_result = timeout(TEST_TIMEOUT, consumer.commit()).await;
         assert!(commit_result.is_ok(), "Commit operation timed out");

@@ -14,9 +14,11 @@ async fn test_producer_consumer() {
     setup_kafka().await;
 
     let topic = "test_topic";
-    let mut producer = Producer::new("localhost:9092".to_string()).await.expect("Failed to create producer");
+    let mut producer = Producer::new("localhost:9092".to_string())
+        .await
+        .expect("Failed to create producer");
     let mut consumer = Consumer::new(
-        "localhost:9092".to_string(), 
+        "localhost:9092".to_string(),
         "test_group".to_string(),
         topic.to_string(),
     )
@@ -24,7 +26,7 @@ async fn test_producer_consumer() {
     .expect("Failed to create consumer");
 
     let test_message = "test message";
-    
+
     // Produce message
     producer
         .send_message(topic, 0, test_message)
@@ -51,7 +53,9 @@ async fn test_multiple_messages() {
     setup_kafka().await;
 
     let topic = "test_topic_multiple";
-    let mut producer = Producer::new("localhost:9092".to_string()).await.expect("Failed to create producer");
+    let mut producer = Producer::new("localhost:9092".to_string())
+        .await
+        .expect("Failed to create producer");
     let mut consumer = Consumer::new(
         "localhost:9092".to_string(),
         "test_group_multiple".to_string(),
@@ -78,10 +82,7 @@ async fn test_multiple_messages() {
 
     assert_eq!(messages.len(), test_messages.len());
     for (received, original) in messages.iter().zip(test_messages.iter()) {
-        assert_eq!(
-            String::from_utf8_lossy(&received),
-            original.to_string()
-        );
+        assert_eq!(String::from_utf8_lossy(&received), original.to_string());
     }
 
     // Clean up

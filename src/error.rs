@@ -21,16 +21,10 @@ pub enum KafkaError {
     SerializationError(#[from] serde_json::Error),
 
     #[error("Broker error: code={code}, message={message}")]
-    BrokerError {
-        code: i16,
-        message: String,
-    },
+    BrokerError { code: i16, message: String },
 
     #[error("Offset out of range for partition {partition} in topic {topic}")]
-    OffsetOutOfRange {
-        topic: String,
-        partition: i32,
-    },
+    OffsetOutOfRange { topic: String, partition: i32 },
 
     #[error("Unknown error: {0}")]
     Unknown(String),
