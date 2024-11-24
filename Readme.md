@@ -1,167 +1,145 @@
-# Kafka Producer and Consumer in Rust
+# Tiny Kafka - Lightweight Kafka Client in Rust
 
-This repository contains Rust-based implementations of a Kafka producer and a Kafka consumer. It leverages the `rdkafka` library to communicate with Kafka and manage the production and consumption of messages.
+A lightweight, async Rust implementation of a Kafka producer and consumer. This library provides a simple, reliable interface for interacting with Apache Kafka, with built-in timeout handling and connection retries.
+
+## Features
+
+- **Async/Await Support**: Built on tokio for asynchronous operations
+- **Timeout Handling**: Configurable timeouts for all operations
+- **Connection Retries**: Automatic retry logic for failed connections
+- **Error Handling**: Comprehensive error handling and logging
+- **Simple API**: Easy-to-use interface for both producer and consumer
 
 ## Prerequisites
 
-- **Rust**: Ensure you have Rust and Cargo installed on your machine.
-- **Kafka**: A running Kafka cluster that you can connect to.
+- **Rust**: Ensure you have Rust and Cargo installed
+- **Kafka**: A running Kafka broker (default: localhost:9092)
 
-## Setup
+## Installation
 
-1. **Clone the Repository**:
-   ```bash
-   git clone github.com/cploutarchou/tiny_kafka
-   ```
+Add this to your `Cargo.toml`:
 
-2. **Navigate to the Repository**:
-   ```bash
-   cd path-to-repository
-   ```
-
-3. **Build the Code**:
-   ```bash
-   cargo build
-   ```
-
-## Producer
-
-The Kafka producer is a higher-level interface for producing messages to Kafka. It encapsulates the process of initializing a connection to the Kafka broker and sending messages to a specified topic.
-
-### Usage
-
-To initialize the producer:
-
-```rust
-let producer = KafkaProducer::new("localhost:9092", None);
+```toml
+[dependencies]
+tiny_kafka = "1.0.5"
+tokio = { version = "1.0", features = ["full"] }
 ```
 
-To send a message to a Kafka topic:
+## Usage
+
+### Consumer
+
+The Kafka consumer provides a robust way to consume messages from Kafka topics with automatic timeout handling and connection retries.
 
 ```rust
-let msg = Message::new("key1", "value1");
-producer.send_message("my-topic", msg).await;
-```
-
-### Custom Configurations
-
-You can provide custom configurations while initializing the producer:
-
-```rust
-let mut configs = HashMap::new();
-configs.insert("max.in.flight.requests.per.connection", "5");
-let producer_with_configs = KafkaProducer::new("localhost:9092", Some(configs));
-```
-
-## Consumer
-
-The Kafka consumer provides functionality to consume messages from a Kafka topic.
-
-### Usage
-
-#### To initialize the consumer:
-
-```rust
-let consumer = KafkaConsumer::new("localhost:9092", "my_group", "my_topic");
-```
-
-#### To consume messages:
-
-```rust
-if let Some(msg) = consumer.poll().await {
-    println!("Received: {} -> {}", msg.key, msg.value);
-}
-```
-#### Full Main Function Example with Tokio and Async
-
-Below is a detailed example of how to utilize both the Kafka producer and consumer within an asynchronous context, leveraging Tokio.
-
-```rust
-use log::info;
-use std::sync::Arc;
 use tiny_kafka::consumer::KafkaConsumer;
-use tiny_kafka::producer::{KafkaProducer, Message};
+use tokio;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-
-   let rt = tokio::runtime::Runtime::new().unwrap();
-   // Assuming kafka_bootstrap_servers is of type String
-   let brokers = Arc::new("localhost:9092".to_string());
-   let topics = Arc::new(vec!["test".to_string()]);
-
-   // Consumer task
-   let brokers_for_task1 = brokers.clone();
-   let topics_for_task1 = topics.clone();
-   let task1 = async move {
-      let consumer = KafkaConsumer::new(
-         brokers_for_task1.as_str(),
-         "kafka-to-elastic",
-         topics_for_task1.get(0).unwrap(),
-      );
-      loop {
-         if let Some(msg) = consumer.poll().await {
-            info!(
-                    "Consumed message with key: {} and value: {}",
-                    msg.key, msg.value
-                );
-         }
-      }
-   };
-   rt.spawn(task1);
-
-   // Producer task
-   let brokers_for_task2 = brokers.clone();
-   let topics_for_task2 = topics.clone();
-   let task2 = async move {
-      let producer = KafkaProducer::new(brokers_for_task2.as_str(), Option::None);
-
-      for i in 0..100 {
-         let key = format!("test_key_{}", i);
-         let value = format!("test_value_{}", i);
-         let message = Message::new(&key, &value);
-
-         producer
-                 .send_message(topics_for_task2.get(0).unwrap(), message)
-                 .await;
-         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-      }
-   };
-   rt.spawn(task2);
-
-   // Wait for a ctrl-c signal
-   tokio::signal::ctrl_c().await?;
-   println!("ctrl-c received!");
-
-   Ok(())
+async fn main() -> std::io::Result<()> {
+    // Create a new consumer
+    let mut consumer = KafkaConsumer::new(
+        "127.0.0.1:9092".to_string(),
+        "my-group".to_string(),
+        "my-topic".to_string(),
+    ).await?;
+    
+    // Connect with automatic retries
+    consumer.connect().await?;
+    
+    // Consume messages
+    let messages = consumer.consume().await?;
+    for msg in messages {
+        println!("Received message: {:?}", msg);
+    }
+    
+    // Clean up
+    consumer.close().await?;
+    Ok(())
 }
-
 ```
 
-### Custom Configurations
+#### Consumer Configuration
 
-Just like the producer, the consumer also supports custom configurations:
+The consumer supports various configuration options:
 
 ```rust
-let mut new_configs = HashMap::new();
-new_configs.insert("auto.offset.reset".to_string(), "earliest".to_string());
-consumer.set_client_config("localhost:9092", "my_group", "my_topic", new_configs);
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);    // Timeout for operations
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);  // Initial connection timeout
 ```
 
-## Running Tests
+### Producer
 
-To run tests:
+The Kafka producer provides a reliable way to send messages to Kafka topics:
+
+```rust
+use tiny_kafka::producer::KafkaProducer;
+
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    // Create a new producer
+    let producer = KafkaProducer::new(
+        "127.0.0.1:9092".to_string(),
+        None, // Optional configurations
+    );
+    
+    // Send a message
+    producer.send_message(
+        "my-topic",
+        Message::new("key", "value"),
+    ).await?;
+    
+    Ok(())
+}
+```
+
+## Error Handling
+
+The library provides detailed error handling with specific error types for different failure scenarios:
+
+- Connection timeouts
+- Operation timeouts
+- Network errors
+- Protocol errors
+
+Example error handling:
+
+```rust
+match consumer.connect().await {
+    Ok(_) => println!("Connected successfully"),
+    Err(e) => match e.kind() {
+        io::ErrorKind::TimedOut => println!("Connection timed out"),
+        io::ErrorKind::ConnectionRefused => println!("Connection refused"),
+        _ => println!("Other error: {}", e),
+    }
+}
+```
+
+## Testing
+
+The library includes comprehensive test coverage. Run the tests with:
 
 ```bash
-cargo test
+cargo test --lib
 ```
 
-Ensure your Kafka broker is running and the test topic exists.
+## Logging
 
-## Contribution
+The library uses the `tracing` crate for logging. Enable debug logging to see detailed operation information:
 
-We welcome contributions! Feel free to open issues, submit pull requests, or just spread the word.
+```rust
+use tracing_subscriber;
+
+fn main() {
+    tracing_subscriber::fmt::init();
+    // Your code here
+}
+```
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the MIT License - see the LICENSE file for details.

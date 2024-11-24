@@ -9,13 +9,22 @@ repository = "https://github.com/cploutarchou/tiny_kafka"
 keywords = ["kafka", "rust-client", "producer", "consumer", "streaming"]
 
 [dependencies]
-tokio = { version = "1", features = ["full", "test-util"] }  # Ensure 'test-util' feature is enabled for testing
-bytes = "1"
+tokio = { version = "1", features = ["full", "test-util"] }
+bytes = "1.5.0"
+thiserror = "1.0"
+tracing = "0.1"
+backoff = { version = "0.4", features = ["tokio"] }
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = { version = "1.5", features = ["unicode-case"] }
 
 [dev-dependencies]
-mockall = "0.12.1"  # for mocking
-
-
+mockall = "0.12.1"
+tracing-subscriber = "0.3"
+tokio-test = "0.4"
+assert_matches = "1.5"
+tracing-test = "0.2"
 
 [lib]
 name = "tiny_kafka"
